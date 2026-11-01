@@ -530,6 +530,75 @@ def test_compressed_tensors_transforms_perplexity(
         assert perplexity <= exp_perplexity
 
 
+def test_compressed_tensors_diagonal_checkpoint_generation(vllm_runner, tmp_path):
+    """A saved diagonal transform must preserve generation after native loading."""
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    torch.manual_seed(42)
+    model = LlamaForCausalLM(
+        LlamaConfig(
+            vocab_size=64,
+            hidden_size=128,
+            intermediate_size=256,
+            num_hidden_layers=1,
+            mlp_bias=True,
+            num_attention_heads=2,
+            num_key_value_heads=2,
+            max_position_embeddings=64,
+        )
+    ).to(torch.bfloat16)
+    projection = model.model.layers[0].mlp.down_proj
+    with torch.no_grad():
+        projection.bias.fill_(0.125)
+    original_path, transformed_path = tmp_path / "original", tmp_path / "transformed"
+    model.save_pretrained(original_path)
+    scale = torch.tensor([0.5, 1.0, 2.0, 4.0], dtype=torch.bfloat16).repeat(64)
+    with torch.no_grad():
+        projection.weight.div_(scale)
+    projection.osfp4_input = torch.nn.Module()
+    projection.osfp4_input.register_parameter(
+        "weight", torch.nn.Parameter(scale, requires_grad=False)
+    )
+    model.config.quantization_config = {
+        "quant_method": "compressed-tensors",
+        "format": "dense",
+        "config_groups": {},
+        "transform_config": {
+            "config_groups": {
+                "osfp4": {
+                    "type": "diagonal",
+                    "precision": "torch.bfloat16",
+                    "apply": [
+                        {
+                            "targets": ["model.layers.0.mlp.down_proj"],
+                            "location": "input",
+                        }
+                    ],
+                }
+            }
+        },
+    }
+    model.save_pretrained(transformed_path)
+    results = []
+    for path in (original_path, transformed_path):
+        with vllm_runner(
+            str(path),
+            dtype="bfloat16",
+            skip_tokenizer_init=True,
+            enforce_eager=True,
+            max_model_len=64,
+            max_num_seqs=1,
+            enable_prefix_caching=False,
+        ) as llm:
+            results.append(llm.generate_greedy_logprobs([[1, 4, 7, 8]], 4, 5))
+    check_logprobs_close(
+        outputs_0_lst=results[0],
+        outputs_1_lst=results[1],
+        name_0="original",
+        name_1="diagonal checkpoint",
+    )
+
+
 @pytest.mark.parametrize(
     "linear_backend", ["auto", "marlin"] if current_platform.is_cuda() else ["auto"]
 )

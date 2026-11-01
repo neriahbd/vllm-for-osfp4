@@ -20,6 +20,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsScheme,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.transform.module import (  # noqa: E501
+    DiagonalTransform,
     HadamardTransform,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.transform.utils import (  # noqa: E501
@@ -66,8 +67,8 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
         self.input_tfms = input_tfms
         self.output_tfms = output_tfms
 
-        self.input_transform: HadamardTransform | None = None
-        self.output_transform: HadamardTransform | None = None
+        self.input_transform: HadamardTransform | DiagonalTransform | None = None
+        self.output_transform: HadamardTransform | DiagonalTransform | None = None
 
     def create_weights(
         self,
@@ -107,11 +108,13 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
 
         # create submodules for weight loading
         if len(self.input_tfms) > 0:
+            # Input transforms must run before any fused activation quantization.
+            layer.requires_unquantized_input = True
             scheme_name = list(self.input_tfms.values())[0].scheme_name
             location = list(self.input_tfms.values())[0].args.location
             transform_name = f"{scheme_name}_{location}"
 
-            transform = HadamardTransform(
+            transform = self._create_transform(
                 self.input_tfms,
                 layer,
                 weight_loader,
@@ -126,7 +129,7 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
             location = list(self.output_tfms.values())[0].args.location
             transform_name = f"{scheme_name}_{location}"
 
-            transform = HadamardTransform(
+            transform = self._create_transform(
                 self.output_tfms,
                 layer,
                 weight_loader,
@@ -139,6 +142,27 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
         # compute partition ranges for slicing activations
         starts = [0] + list(accumulate(output_partition_sizes))[:-1]
         self.partition_ranges = list(zip(starts, output_partition_sizes))
+
+    @staticmethod
+    def _create_transform(
+        transforms: dict[int, TransformTuple],
+        layer: torch.nn.Module,
+        weight_loader: Callable,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+    ) -> HadamardTransform | DiagonalTransform:
+        _, scheme, args = next(iter(transforms.values()))
+        if scheme.type == "diagonal":
+            return DiagonalTransform(
+                scheme, args, input_size_per_partition, weight_loader
+            )
+        return HadamardTransform(
+            transforms,
+            layer,
+            weight_loader,
+            input_size_per_partition,
+            output_partition_sizes,
+        )
 
     def process_weights_after_loading(self, layer):
         self.quant_method.process_weights_after_loading(layer)
@@ -156,7 +180,8 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
         if self.input_transform is not None:
             x = self.input_transform(x)
 
-        assert bias is None
+        if self.output_transform is not None:
+            assert bias is None
         x = self.quant_method.apply(layer, x, bias)
 
         # In most cases, input transforms are preferred over output transforms
@@ -170,6 +195,14 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
         return x
 
     def _validate_tfm_schemes(self, num_partitions: int):
+        if num_partitions > 1 and any(
+            tfm.scheme.type == "diagonal"
+            for tfm in (*self.input_tfms.values(), *self.output_tfms.values())
+        ):
+            raise NotImplementedError(
+                "Diagonal transforms on fused projections are unsupported; "
+                "independent partition scales cannot share one input multiplier"
+            )
         if len(self.input_tfms) > 0:
             if 0 not in self.input_tfms:
                 raise ValueError("Must have same input")

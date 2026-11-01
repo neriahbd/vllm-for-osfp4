@@ -25,6 +25,30 @@ Also includes support for QuIP and SpinQuant-style transforms as well as KV cach
 - **vLLM Integration**: Seamlessly deploy quantized models with vLLM using the compressed-tensors format
 - **Hugging Face Compatibility**: Works with models from the Hugging Face Hub
 
+## Diagonal input transforms
+
+Compressed-tensors checkpoints can describe per-channel input scaling using
+`type: "diagonal"` in `quantization_config.transform_config.config_groups`.
+vLLM loads the scale from `<layer>.<group>_input.weight` and multiplies each
+input channel before the underlying Linear method quantizes or consumes it.
+The saved vector is an input multiplier (`inverse: false`); inverse transforms
+are unsupported.
+For example, OSFP4's `osfp4` group loads `<layer>.osfp4_input.weight`.
+The checkpoint weights must already contain the inverse balancing; vLLM does
+not apply that balancing again.
+
+Use the usual `quantization="compressed-tensors"` option, or allow vLLM to
+detect it from the checkpoint. No OSFP4 plugin is required. The transform
+retains its declared precision when loaded and converts the scale to the input
+dtype for multiplication. Existing NVFP4 weight and activation scales retain
+their usual meaning.
+
+The initial implementation supports full-width input transforms on unfused
+Linear projections. The vector follows the input-channel partition for row
+parallelism and is replicated for column parallelism. Fused projections such
+as `qkv_proj` and `gate_up_proj`, output transforms, and `head_dim` are not
+supported. Existing quantization backend and hardware requirements still apply.
+
 ## Resources
 
 - [LLM Compressor examples](https://github.com/vllm-project/llm-compressor/tree/main/examples)

@@ -19,7 +19,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.transform.utils 
 )
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.parameter import SharedWeightParameter
+from vllm.model_executor.parameter import RowvLLMParameter, SharedWeightParameter
 
 
 class HadamardTransform(torch.nn.Module):
@@ -162,3 +162,34 @@ class HadamardTransform(torch.nn.Module):
             for partition in self.weight.partitions.values():
                 if partition.data.data_ptr() != first_data.data_ptr():
                     raise ValueError("")
+
+
+class DiagonalTransform(torch.nn.Module):
+    """Load a per-channel input scale; checkpoint weights are already balanced."""
+
+    def __init__(
+        self,
+        scheme: TransformScheme,
+        args: TransformArgs,
+        input_size_per_partition: int,
+        weight_loader: Callable,
+    ):
+        super().__init__()
+        if (
+            args.location != TransformLocation.INPUT
+            or scheme.head_dim is not None
+            or args.inverse
+        ):
+            raise NotImplementedError(
+                "Diagonal transforms support full-width input scaling "
+                "with inverse=False only"
+            )
+        self.weight = RowvLLMParameter(
+            data=torch.empty(input_size_per_partition, dtype=scheme.precision),
+            input_dim=0,
+            weight_loader=weight_loader,
+        )
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        scale = self.weight.to(value)
+        return value * scale
