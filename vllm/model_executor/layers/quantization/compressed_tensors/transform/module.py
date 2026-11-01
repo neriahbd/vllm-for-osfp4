@@ -175,15 +175,11 @@ class DiagonalTransform(torch.nn.Module):
         weight_loader: Callable,
     ):
         super().__init__()
-        if (
-            args.location != TransformLocation.INPUT
-            or scheme.head_dim is not None
-            or args.inverse
-        ):
+        if args.location != TransformLocation.INPUT or scheme.head_dim is not None:
             raise NotImplementedError(
-                "Diagonal transforms support full-width input scaling "
-                "with inverse=False only"
+                "Diagonal transforms support full-width input scaling only"
             )
+        self.inverse = args.inverse
         self.weight = RowvLLMParameter(
             data=torch.empty(input_size_per_partition, dtype=scheme.precision),
             input_dim=0,
@@ -192,4 +188,4 @@ class DiagonalTransform(torch.nn.Module):
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
         scale = self.weight.to(value)
-        return value * scale
+        return value / scale if self.inverse else value * scale

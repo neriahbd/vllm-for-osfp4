@@ -59,7 +59,6 @@ steps:
   timeout_in_minutes: 20
   source_file_dependencies:
   - tests/fusion
-  - tests/quantization/test_compressed_tensors_diagonal.py
   - tests/quantization/test_compressed_tensors.py
   - vllm/model_executor/layers/fusion
   - vllm/model_executor/kernels/linear
@@ -69,7 +68,6 @@ steps:
     - pytest -v -s fusion/
     - >-
       pytest -v -s
-      quantization/test_compressed_tensors_diagonal.py
       quantization/test_compressed_tensors.py::test_compressed_tensors_diagonal_checkpoint_generation
   mirror:
     amd:

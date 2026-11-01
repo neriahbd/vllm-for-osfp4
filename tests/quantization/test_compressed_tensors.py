@@ -530,7 +530,10 @@ def test_compressed_tensors_transforms_perplexity(
         assert perplexity <= exp_perplexity
 
 
-def test_compressed_tensors_diagonal_checkpoint_generation(vllm_runner, tmp_path):
+@pytest.mark.parametrize("inverse", [False, True])
+def test_compressed_tensors_diagonal_checkpoint_generation(
+    vllm_runner, tmp_path, inverse
+):
     """A saved diagonal transform must preserve generation after native loading."""
     from transformers import LlamaConfig, LlamaForCausalLM
 
@@ -554,9 +557,12 @@ def test_compressed_tensors_diagonal_checkpoint_generation(vllm_runner, tmp_path
     model.save_pretrained(original_path)
     scale = torch.tensor([0.5, 1.0, 2.0, 4.0], dtype=torch.bfloat16).repeat(64)
     with torch.no_grad():
-        projection.weight.div_(scale)
-    projection.osfp4_input = torch.nn.Module()
-    projection.osfp4_input.register_parameter(
+        if inverse:
+            projection.weight.mul_(scale)
+        else:
+            projection.weight.div_(scale)
+    projection.smooth_quant_input = torch.nn.Module()
+    projection.smooth_quant_input.register_parameter(
         "weight", torch.nn.Parameter(scale, requires_grad=False)
     )
     model.config.quantization_config = {
@@ -565,13 +571,14 @@ def test_compressed_tensors_diagonal_checkpoint_generation(vllm_runner, tmp_path
         "config_groups": {},
         "transform_config": {
             "config_groups": {
-                "osfp4": {
+                "smooth_quant": {
                     "type": "diagonal",
                     "precision": "torch.bfloat16",
                     "apply": [
                         {
                             "targets": ["model.layers.0.mlp.down_proj"],
                             "location": "input",
+                            "inverse": inverse,
                         }
                     ],
                 }
