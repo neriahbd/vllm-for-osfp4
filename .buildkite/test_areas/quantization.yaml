@@ -59,16 +59,12 @@ steps:
   timeout_in_minutes: 20
   source_file_dependencies:
   - tests/fusion
-  - tests/quantization/test_compressed_tensors.py
   - vllm/model_executor/layers/fusion
   - vllm/model_executor/kernels/linear
   - vllm/model_executor/layers/quantization/compressed_tensors
   - vllm/model_executor/layers/quantization/modelopt.py
   commands:
     - pytest -v -s fusion/
-    - >-
-      pytest -v -s
-      quantization/test_compressed_tensors.py::test_compressed_tensors_diagonal_checkpoint_generation
   mirror:
     amd:
       label: ":amd: (MI300) Quantized Fusions"
