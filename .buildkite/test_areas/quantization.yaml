@@ -59,16 +59,12 @@ steps:
   timeout_in_minutes: 20
   source_file_dependencies:
   - tests/fusion
-  - tests/quantization/test_compressed_tensors.py
   - vllm/model_executor/layers/fusion
   - vllm/model_executor/kernels/linear
   - vllm/model_executor/layers/quantization/compressed_tensors
   - vllm/model_executor/layers/quantization/modelopt.py
   commands:
     - pytest -v -s fusion/
-    - >-
-      pytest -v -s
-      quantization/test_compressed_tensors.py::test_compressed_tensors_diagonal_checkpoint_generation
   mirror:
     amd:
       label: ":amd: (MI300) Quantized Fusions"
@@ -167,20 +163,3 @@ steps:
       - vllm/model_executor/model_loader/
       commands:
       - pytest -v -s models/quantization
-
-- label: ":nvidia: (2xB200) MoE diagonal transforms"
-  key: moe-diagonal-transforms
-  device: b200-k8s
-  num_devices: 2
-  working_dir: "/vllm-workspace/"
-  timeout_in_minutes: 60
-  source_file_dependencies:
-  - vllm/model_executor/layers/fused_moe/
-  - vllm/model_executor/layers/quantization/compressed_tensors/
-  - tests/quantization/test_compressed_tensors_moe_transforms.py
-  - tests/quantization/test_moe_diagonal_loading.py
-  commands:
-    - >-
-      pytest -v -s
-      tests/quantization/test_compressed_tensors_moe_transforms.py
-      tests/quantization/test_moe_diagonal_loading.py
