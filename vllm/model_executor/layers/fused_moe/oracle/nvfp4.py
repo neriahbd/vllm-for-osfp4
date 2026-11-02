@@ -203,6 +203,7 @@ def select_nvfp4_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None,
     activation_key: QuantKey | None,
+    has_input_transforms: bool = False,
 ) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEExperts]]:
     """Select the primary NvFP4 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
@@ -294,6 +295,44 @@ def select_nvfp4_moe_backend(
                 return backend, k_cls
 
         raise ValueError(_make_log_unsupported(backend, reason))
+
+    expert_cls: type[mk.FusedMoEExperts]
+    if has_input_transforms:
+        config.has_input_transforms = True
+        parallel = config.moe_parallel_config
+        if (
+            parallel.use_ep
+            or parallel.enable_eplb
+            or config.is_fused_shared_expert_requested
+        ):
+            raise NotImplementedError(
+                "Expert diagonals currently support TP without EP/EPLB "
+                "or fused shared experts"
+            )
+        if activation_key is None:
+            from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+                HummingGroupedExperts,
+            )
+
+            backend, expert_cls = NvFp4MoeBackend.HUMMING, HummingGroupedExperts
+            requested = "humming"
+        else:
+            from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+                CutlassExpertsFp4,
+            )
+
+            backend, expert_cls = NvFp4MoeBackend.VLLM_CUTLASS, CutlassExpertsFp4
+            requested = "cutlass"
+        if config.moe_backend not in ("auto", requested):
+            raise ValueError(
+                f"Expert diagonals require moe_backend={requested!r} for this format"
+            )
+        supported, reason = expert_cls.is_supported_config(
+            expert_cls, config, weight_key, activation_key, activation_format
+        )
+        if not supported:
+            raise ValueError(_make_log_unsupported(backend, reason))
+        return backend, expert_cls
 
     # Handle explicit moe_backend from user.
     runner_backend = config.moe_backend
@@ -471,7 +510,17 @@ def convert_to_nvfp4_moe_kernel_format(
         else:
             quant_config = {"quant_method": "modelopt", "quant_algo": "nvfp4"}
 
-        convert_to_humming_moe_kernel_format(layer, quant_config=quant_config)
+        if getattr(layer, "input_transforms", None) is not None:
+            from vllm.utils.humming import HummingInputSchema
+
+            convert_to_humming_moe_kernel_format(
+                layer,
+                quant_config=quant_config,
+                input_schema=HummingInputSchema(),
+                allow_input_schema_fallback=False,
+            )
+        else:
+            convert_to_humming_moe_kernel_format(layer, quant_config=quant_config)
         a13_scale = None
         a2_scale = None
         w13 = layer.w13_weight

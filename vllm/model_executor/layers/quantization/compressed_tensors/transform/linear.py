@@ -153,6 +153,19 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
     ) -> HadamardTransform | DiagonalTransform:
         _, scheme, args = next(iter(transforms.values()))
         if scheme.type == "diagonal":
+            if len(output_partition_sizes) > 1:
+                loaded_shards: set[str | int | None] = set()
+
+                def load_shared_input(param, loaded_weight, shard_id=None):
+                    value = loaded_weight.to(param)
+                    if value.shape != param.shape:
+                        raise ValueError("Invalid fused input diagonal shape")
+                    if loaded_shards and not torch.equal(param, value):
+                        raise ValueError("Fused input diagonal vectors must match")
+                    param.data.copy_(value)
+                    loaded_shards.add(shard_id)
+
+                weight_loader = load_shared_input
             return DiagonalTransform(
                 scheme, args, input_size_per_partition, weight_loader
             )
@@ -196,8 +209,7 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
 
     def _validate_tfm_schemes(self, num_partitions: int):
         if num_partitions > 1 and any(
-            tfm.scheme.type == "diagonal"
-            for tfm in (*self.input_tfms.values(), *self.output_tfms.values())
+            tfm.scheme.type == "diagonal" for tfm in self.output_tfms.values()
         ):
             raise NotImplementedError(
                 "Diagonal transforms on fused projections are unsupported; "
@@ -208,7 +220,21 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
                 raise ValueError("Must have same input")
 
             for part_index in range(num_partitions):
-                if self.input_tfms[part_index] != self.input_tfms[0]:
+                current = self.input_tfms.get(part_index)
+                first = self.input_tfms[0]
+                if current is None:
+                    raise ValueError("Must have same input")
+                if first.scheme.type == "diagonal":
+                    same = (
+                        current.scheme_name == first.scheme_name
+                        and current.scheme.type == first.scheme.type
+                        and current.scheme.precision == first.scheme.precision
+                        and current.scheme.head_dim == first.scheme.head_dim
+                        and current.args.inverse == first.args.inverse
+                    )
+                else:
+                    same = current == first
+                if not same:
                     raise ValueError("Must have same input")
 
         if len(self.output_tfms) > 0:

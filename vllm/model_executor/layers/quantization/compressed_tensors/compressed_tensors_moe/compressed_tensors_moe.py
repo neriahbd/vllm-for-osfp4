@@ -30,16 +30,25 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         layer: torch.nn.Module,
         layer_name: str,
     ) -> FusedMoEMethodBase:
+        from ..transform.moe import resolve_moe_input_transforms
+
+        projection_names = {
+            layer.ckpt_gate_proj_name: "w13",
+            layer.ckpt_down_proj_name: "w2",
+        }
+        if layer.moe_config.is_act_and_mul:
+            projection_names[layer.ckpt_up_proj_name] = "w13"
+        input_transforms = resolve_moe_input_transforms(
+            layer_name,
+            quant_config.transform_config,
+            layer.moe_config.num_logical_experts,
+            projection_names,
+        )
         # RoutedExperts was made by combining multiple Linears so need to
         # make sure quantization config for Linear can target it
         quant_config._add_fused_moe_to_target_scheme_map()
         unfused_names = [
-            f"{layer_name}.0.{proj_name}"
-            for proj_name in (
-                layer.ckpt_gate_proj_name,
-                layer.ckpt_up_proj_name,
-                layer.ckpt_down_proj_name,
-            )
+            f"{layer_name}.0.{projection_name}" for projection_name in projection_names
         ]
         # TODO: refactor this to use expert_mapping and check all layer numbers
         all_scheme_dicts = [
@@ -54,6 +63,13 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 "quantization scheme but found multiple"
             )
 
+        if input_transforms and (
+            scheme_dict is None
+            or not quant_config._is_nvfp4_format(scheme_dict.get("weights"))
+        ):
+            raise NotImplementedError(
+                "Expert diagonals currently require NVFP4 weights"
+            )
         if scheme_dict is None:  # ignored layer
             return UnquantizedFusedMoEMethod(layer.moe_config)
 
@@ -156,7 +172,10 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                     f"format or None for NVFP4A16, found {input_quant}"
                 )
             return CompressedTensorsW4A4Nvfp4MoEMethod(
-                layer.moe_config, layer_name, use_a16=(input_quant is None)
+                layer.moe_config,
+                layer_name,
+                use_a16=(input_quant is None),
+                input_transforms=input_transforms,
             )
         elif (
             quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant)

@@ -1009,6 +1009,14 @@ class RoutedExperts(PluggableLayer):
 
         for expert_name, loaded_weight in weights:
             qual_name = f"{self.layer_name}.{expert_name}"
+            input_transforms = getattr(self, "input_transforms", None)
+            if input_transforms is not None:
+                loaded_name = input_transforms.load_checkpoint_weight(
+                    qual_name, loaded_weight
+                )
+                if loaded_name is not None:
+                    yield loaded_name
+                    continue
             expert_key = qual_name.partition("experts.")[2].partition(".")[0]
             named_expert = (
                 mapping_by_expert.get(expert_key)

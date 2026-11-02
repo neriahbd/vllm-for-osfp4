@@ -65,8 +65,10 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         layer_name: str | None = None,
         use_a16: bool = False,
         activation_key: QuantKey = kNvfp4Dynamic,
+        input_transforms: dict | None = None,
     ):
         super().__init__(moe)
+        self.input_transforms = input_transforms or {}
         self.group_size = 16
         self.use_a16 = use_a16
         # FC1 input scheme; a per-token one (``kNvfp4DynamicToken``) replaces
@@ -82,6 +84,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             config=self.moe,
             weight_key=kNvfp4Static,
             activation_key=self.activation_key,
+            has_input_transforms=bool(self.input_transforms),
         )
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
@@ -100,6 +103,20 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        if self.input_transforms:
+            from ..transform.moe import MoEInputTransforms
+
+            layer.input_transforms = MoEInputTransforms(
+                self.input_transforms,
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition,
+                self.moe.tp_rank,
+                self.moe.tp_size,
+                full_hidden_size=extra_weight_attrs.get("unpadded_hidden_size"),
+                full_intermediate_size=self.moe.intermediate_size,
+                tp_shard_with_padding=self.moe.tp_shard_with_padding,
+            )
         layer.num_experts = num_experts
         layer.params_dtype = params_dtype
         w13_num_shards = 2 if self.moe.is_act_and_mul else 1
@@ -190,6 +207,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             torch.empty(num_experts, w13_num_shards, dtype=torch.float32),
             requires_grad=False,
         )
+        if self.use_a16 and self.input_transforms:
+            w13_input_scale.data.fill_(1)
         layer.register_parameter("w13_input_global_scale", w13_input_scale)
         extra_weight_attrs.update(
             {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
@@ -200,6 +219,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             torch.empty(num_experts, dtype=torch.float32),
             requires_grad=False,
         )
+        if self.use_a16 and self.input_transforms:
+            w2_input_scale.data.fill_(1)
         layer.register_parameter("w2_input_global_scale", w2_input_scale)
         extra_weight_attrs.update(
             {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
@@ -224,6 +245,17 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         """Convert NVFP4 MoE weights into kernel format and setup the kernel."""
+        if self.input_transforms:
+            layer.input_transforms.validate_loaded()
+            if (
+                not self.use_a16
+                and self.moe.is_act_and_mul
+                and not torch.equal(
+                    layer.w13_input_global_scale[:, 0],
+                    layer.w13_input_global_scale[:, 1],
+                )
+            ):
+                raise ValueError("Fused gate/up input global scales must match")
         # MKM requires wN_weight; the loaded wN_weight_packed params stay registered.
         move_parameter(layer, "w13_weight_packed", "w13_weight")
         move_parameter(layer, "w2_weight_packed", "w2_weight")

@@ -527,6 +527,7 @@ def run_cutlass_moe_fp4(
     expert_map: torch.Tensor | None = None,
     *,
     activation_config: ApplyMoEActivationConfig | None = None,
+    input_transforms: torch.nn.Module | None = None,
 ) -> None:
     """MoE implementation for FP4 Inputs.
 
@@ -627,6 +628,8 @@ def run_cutlass_moe_fp4(
     )
 
     a = ops.shuffle_rows(a, a_map)
+    if input_transforms is not None:
+        a = input_transforms.w13(a, expert_offsets)
     rep_a_fp4, rep_a_blockscale = ops.scaled_fp4_experts_quant(
         a,
         a1_gscale,
@@ -649,8 +652,10 @@ def run_cutlass_moe_fp4(
         blockscale_offsets[:-1],
     )
     del rep_a_fp4, rep_a_blockscale
-    if activation == MoEActivation.SILU and (
-        activation_config is None or activation_config.clamp_limit is None
+    if (
+        input_transforms is None
+        and activation == MoEActivation.SILU
+        and (activation_config is None or activation_config.clamp_limit is None)
     ):
         # Fused SiLU+Mul+NVFP4 quantization
         # Note: c2 workspace is no longer needed since SiLU is fused with quantization.
@@ -665,6 +670,8 @@ def run_cutlass_moe_fp4(
             c1,
             activation_config=activation_config,
         )
+        if input_transforms is not None:
+            c2 = input_transforms.w2(c2, expert_offsets)
         int_fp4, int_blockscale = ops.scaled_fp4_experts_quant(
             c2, a2_gscale, expert_offsets, blockscale_offsets, num_topk
         )
@@ -702,6 +709,7 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
     """CUTLASS FP4 fused MoE expert implementation."""
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        self.input_transforms = getattr(layer, "input_transforms", None)
         # Fuse activation scales into w_scale_2 in-place so that
         # g1/g2_alphas (which reference the same tensor) stay in sync
         # when EPLB rearranges the parameter.
@@ -827,6 +835,7 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_map=expert_map,
             activation_config=self.activation_config,
+            input_transforms=getattr(self, "input_transforms", None),
         )
 
 

@@ -110,6 +110,8 @@ def _is_supported_wna16_weight_key(weight_key: QuantKey | None) -> bool:
 
 
 def get_humming_moe_gemm_type(moe_config: FusedMoEConfig | None = None) -> str:
+    if moe_config is not None and moe_config.has_input_transforms:
+        return "grouped_contiguous"
     env_gemm_type: str | None = envs.VLLM_HUMMING_MOE_GEMM_TYPE
     if env_gemm_type is not None and env_gemm_type.lower() != "auto":
         env_gemm_type = env_gemm_type.lower()
@@ -887,6 +889,9 @@ class HummingIndexedExperts(HummingExpertsBase):
 
 
 class HummingGroupedExperts(HummingExpertsBase):
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        self.input_transforms = getattr(layer, "input_transforms", None)
+
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
 
@@ -942,7 +947,24 @@ class HummingGroupedExperts(HummingExpertsBase):
         buffers["output"] = output
 
         scratch = self._get_permute_scratch()
-        if a1q_scale is None:
+        transforms = getattr(self, "input_transforms", None)
+        if transforms is not None:
+            if a1q_scale is not None:
+                raise ValueError("Expert diagonals require unquantized input")
+            hidden_states, _, expert_offsets, inv_perm, _ = moe_permute(
+                hidden_states=hidden_states,
+                a1q_scale=None,
+                topk_ids=topk_ids,
+                n_expert=global_num_experts,
+                n_local_expert=self.num_experts,
+                expert_map=expert_map,
+                scratch=scratch,
+                permuted_hidden_states=buffers["quanted_gate_up_input"],
+            )
+            hidden_states = transforms.w13(hidden_states, expert_offsets)
+            scatter_idx = None
+            num_valid_tokens = expert_offsets[-1:]
+        elif a1q_scale is None:
             assert scratch is not None
             scatter_metadata = moe_prepare_scatter(topk_ids, expert_map, scratch)
             expert_offsets, scatter_idx = scatter_metadata
@@ -991,11 +1013,18 @@ class HummingGroupedExperts(HummingExpertsBase):
             tuning_config=self.w13_tuning_config_str,
         )
 
+        down_inputs = buffers["gate_up_output"]
+        down_activation: MoEActivation | None = activation
+        if transforms is not None:
+            down_inputs = torch.empty_like(buffers["quanted_down_input"])
+            self.apply_activation(activation, down_inputs, buffers["gate_up_output"])
+            down_inputs = transforms.w2(down_inputs, expert_offsets)
+            down_activation = None
         inputs, input_scale, input_scale_2 = self.process_input(
             "w2",
-            inputs=buffers["gate_up_output"],
+            inputs=down_inputs,
             quanted_input=buffers["quanted_down_input"],
-            activation=activation,
+            activation=down_activation,
             num_valid_tokens=expert_offsets[-1:],
         )
 
