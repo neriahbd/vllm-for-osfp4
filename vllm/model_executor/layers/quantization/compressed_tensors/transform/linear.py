@@ -26,7 +26,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.transform.module
 from vllm.model_executor.layers.quantization.compressed_tensors.transform.utils import (  # noqa: E501
     TransformTuple,
 )
-from vllm.platforms import current_platform
 
 
 class CompressedTensorsLinearTransformMethod(LinearMethodBase):
@@ -42,17 +41,17 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
         input_tfms: dict[int, TransformTuple],
         output_tfms: dict[int, TransformTuple],
     ) -> "CompressedTensorsLinearTransformMethod":
-        from vllm.model_executor.layers.quantization.compressed_tensors.transform.schemes.linear_qutlass_nvfp4 import (  # noqa: E501
-            QutlassNvFP4LinearMethod,
-            is_qutlass_fp4_scheme,
+        from vllm.model_executor.layers.quantization.compressed_tensors.transform.schemes.linear_humming_nvfp4 import (  # noqa: E501
+            HummingNvFP4HadamardLinearMethod,
+            is_humming_hadamard_fp4_scheme,
         )
 
         assert input_tfms or output_tfms
 
-        if is_qutlass_fp4_scheme(
-            quant_scheme, input_tfms
-        ) and current_platform.has_device_capability(100):
-            return QutlassNvFP4LinearMethod(quant_method, input_tfms, output_tfms)
+        if is_humming_hadamard_fp4_scheme(quant_scheme, input_tfms, output_tfms):
+            return HummingNvFP4HadamardLinearMethod(
+                quant_method, input_tfms, output_tfms
+            )
 
         # hadacore or dense gemm is selected by Transform module
         return cls(quant_method, input_tfms, output_tfms)
@@ -80,6 +79,9 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        # The transform must see the raw activation, before any quantization
+        layer.requires_unquantized_input = bool(self.input_tfms)
+
         # get weight loader for transforms
         weight_loader: Callable = extra_weight_attrs.get("weight_loader")  # type: ignore[assignment]
 
@@ -108,8 +110,6 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
 
         # create submodules for weight loading
         if len(self.input_tfms) > 0:
-            # Input transforms must run before any fused activation quantization.
-            layer.requires_unquantized_input = True
             scheme_name = list(self.input_tfms.values())[0].scheme_name
             location = list(self.input_tfms.values())[0].args.location
             transform_name = f"{scheme_name}_{location}"
